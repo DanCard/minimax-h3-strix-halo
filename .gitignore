@@ -1,0 +1,86 @@
+# ---------------------------------------------------------------------------
+# Model weights and other large binaries
+#
+# models_fixed/ alone is ~39GB of repaired safetensors. Nothing in this repo
+# should ever carry weights -- fetch_quant.py and repair_weights.py reproduce
+# them from Hugging Face.
+# ---------------------------------------------------------------------------
+models_fixed/
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.onnx
+*.msgpack
+*.h5
+*.tar
+*.tar.gz
+*.zip
+*.7z
+
+# Vendored application -- clone it yourself, see README
+ComfyUI/
+
+# ---------------------------------------------------------------------------
+# Generated media
+#
+# Every clip this project produces is model output: large, not reproducible
+# byte-for-byte, and not necessarily something to publish. Keep all of it out.
+# ---------------------------------------------------------------------------
+outputs/*
+!outputs/.gitkeep
+*.mp4
+*.webm
+*.mkv
+*.mov
+*.avi
+*.gif
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.tiff
+
+# Run records -- contain prompt tags and local output filenames
+timings.jsonl
+*.log
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Credentials and local config -- never commit
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+secrets.*
+.hf_token
+huggingface_token*
+
+# ---------------------------------------------------------------------------
+# Editor / OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
