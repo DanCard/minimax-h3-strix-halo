@@ -19,49 +19,62 @@ All with the 4-step turbo LoRA, 124 frames (5.17s @ 24fps), joint video+audio:
 | 512x288 | 147k | 17.9k | **11.2** | 96 s | models already resident |
 | 384x640 | 246k | 29.8k | not recorded | 228 s | includes ~45s model reload |
 | 896x512 | 459k | 55.6k | **123–126** | 571 s | step-to-step gap, steady across all 4 |
-| 1344x768 | 1032k | 125k | ~550 (est.) | ~40 min (est.) | trained canvas; abandoned partway, see below |
+| 1344x768 | 1032k | 125k | **766–858** | **56 min 47 s** | trained canvas, completed |
 
 A 22-frame (0.92s) clip at 512x288 sampled in 6.6 s.
 
-**Resolution is the expensive axis, not steps, and the scaling looks close to
-quadratic in token count.** Tokens are the latent grid, `W/16 x H/16 x 31` at
-124 frames:
+**The trained canvas works.** 1344x768 is not out of reach on this hardware — it
+is just a ~1 hour job for a 5.17 s clip.
 
-| Canvas | Latent grid | Tokens | vs. baseline | Sampler s/it | vs. baseline |
-|---|---|---|---|---|---|
-| 512x288, 124f | 32x18x31 | ~17.9k | 1.00x | 11.2 | 1.00x |
-| 896x512, 124f | 56x32x31 | ~55.6k | 3.11x | ~124 | **9.93x** |
+**Resolution is the expensive axis, not steps, and it scales worse than
+quadratically.** Tokens are the latent grid, `W/16 x H/16 x 31` at 124 frames:
 
-3.11² = 9.7 predicted against 9.93 measured, giving:
+| Canvas | Latent grid | Tokens | vs. baseline | Sampler s/it | vs. baseline | Pairwise exponent |
+|---|---|---|---|---|---|---|
+| 512x288, 124f | 32x18x31 | ~17.9k | 1.00x | 11.2 | 1.00x | — |
+| 896x512, 124f | 56x32x31 | ~55.6k | 3.11x | ~124 | 11.1x | **2.27** |
+| 1344x768, 124f | 84x48x31 | ~125k | 7.00x | ~814 | 72.7x | **2.32** |
+
+A log-log fit across all three points gives:
 
 ```
-s/step ≈ 11.2 × (tokens / 17.9k)²
+s/step ≈ 11.2 × (tokens / 17.9k)^2.2
 ```
 
-**Two caveats on that fit.** It rests on two sampler-rate points, and the
-512x288 baseline is the shakier of them — at that size a larger share of any
-wall-clock measurement is fixed overhead. 384x640 is deliberately excluded: only
-its wall time was recorded, and wall time folds in text encode, VAE decode and
-mux, so it is not comparable to a sampler rate. (Wall/4 there is ~46 s/it against
-~31 predicted — the gap is overhead, not a scaling failure, but it cannot be used
-as evidence either way.) Treat the formula as a good planning heuristic that
-happens to fit two clean points, not as a confirmed exponent. See open thread 4.
+**The exponent is ~2.2–2.3 and drifting upward, not 2.0.** Pure attention would
+be exactly quadratic; the excess means the constant itself degrades as the
+sequence grows — consistent with attention tiles falling out of cache on an iGPU
+that shares system memory bandwidth. Practical consequence: **extrapolating from
+small canvases under-predicts large ones.** Treat 2.2 as a floor, not a law, and
+expect the error to grow beyond 125k tokens.
+
+384x640 is deliberately excluded from the fit: only its wall time was recorded,
+and wall time folds in text encode, VAE decode and mux, so it is not comparable
+to a sampler rate.
 
 The turbo LoRA cuts *how many* steps run; it cannot touch what each step costs.
 
-**On the abandoned 1344x768 run.** An earlier version of this file called that a
-memory cliff — GPU pegged at 100%, VRAM at 96%, still on step 1 of 4 after 16
-minutes — and inferred that no memory-efficient attention backend was dispatching
-on gfx1151. **That reading was wrong.** The formula above predicts ~9 min/step at
-125k tokens, and a first step of >16 min including MIOpen autotune for unseen
-shapes is consistent with it. Nothing fell over; the run was simply slow, and
-would have finished in roughly 40 minutes. It was killed for impatience, not
-failure. 768p is expensive here, not broken.
+**On the earlier "memory cliff".** A previous version of this file described an
+abandoned 1344x768 attempt as a memory cliff, and inferred that no
+memory-efficient attention backend was dispatching on gfx1151. **Both claims were
+wrong.** The completed run settles it — during it:
 
-**Practical envelope:** 384x640 and below is an interactive loop (~2-4 min/clip
-with models resident). 896x512 at ~9.5 min is a reasonable quality/time
-compromise. Full 1344x768 is a ~40 min "start it and walk away" proposition —
-slow, but a known quantity rather than a wall.
+- swap traffic (`si`/`so`) was flat zero
+- VRAM sat at **89%**, *lower* than the 896x512 run that finished fine
+- the GPU was pegged at 100% the whole time
+- per-step times got **faster** as it progressed (858 → 848 → 784 → 766 s),
+  the opposite of a system under growing pressure
+
+Nothing degrades and nothing falls over. The original attempt was killed for
+impatience, not failure. 768p is expensive here, not broken.
+
+**Practical envelope:**
+
+| Canvas | Time | Use |
+|---|---|---|
+| 512x288 | ~1.5 min | prompt iteration |
+| 896x512 | ~9.5 min | quality/time sweet spot — 6x cheaper than 768p |
+| 1344x768 | ~57 min | final render, start it and walk away |
 
 Two things are measured rather than assumed:
 
@@ -138,17 +151,20 @@ blocks and the VAE geometry.
 
 | Lever | Effect | Notes |
 |---|---|---|
-| Canvas size | **~Quadratic in tokens** — measured 9.93× cost for 3.11× tokens | By far the biggest lever |
+| Canvas size | **Tokens^2.2** — measured 72.7× cost for 7.0× tokens | By far the biggest lever |
 | `num_inference_steps` | Linear | Exposed in diffusers; *not* in the HTTP API. Turbo LoRA already puts this at 4 |
 | Duration | Linear-ish in frames, which are linear in tokens | 5.17 s is already the fast end of the diffusers range; ComfyUI goes lower |
 
-Note the measured quadratic disagrees with MiniMax's own documentation, which
-reports 960×544 as ~2.3× faster per step than 1344×768. Those canvases differ by
-1.98× in tokens, so quadratic scaling predicts ~3.9×. The likely explanation is
-that the reference deployment runs a proper fused-attention kernel where the
-quadratic term is far better amortized; on the pytorch attention path here it is
-not. **Don't port MiniMax's canvas/time ratios to this hardware — they are
-optimistic.**
+Note the measured scaling disagrees sharply with MiniMax's own documentation,
+which reports 960×544 as ~2.3× faster per step than 1344×768. Those canvases
+differ by 1.98× in tokens; the exponent measured here predicts ~4.3×.
+
+Real per-step cost is `a·N + b·N^k` — projections and MLPs are linear, attention
+superlinear. On a deployment where `b` is small (fused kernels, dedicated HBM),
+the linear term still matters at these sizes and the observed ratio looks close
+to linear. Here `b` is large enough that the superlinear term runs the show by
+~56k tokens, and `k` itself appears to grow with N. **Don't port MiniMax's
+canvas/time ratios to this hardware — they are optimistic by roughly 2×.**
 
 ## Pre-run estimates (superseded — kept for calibration)
 
@@ -186,15 +202,21 @@ exact hardware — LTX-2 does 10 s with audio in ~10 min — are far more livabl
 | Claim | Predicted | Actual | |
 |---|---|---|---|
 | Minimal probe, 512x288 | 5–15 min | **96 s** | 3–9× too pessimistic |
-| Full 768p, 5 s clip | 20–40 min | ~40 min (est., never completed) | roughly right |
-| Canvas scaling | "6–8× faster than trained canvas" at 512x288 | **~49×** | badly wrong |
+| Full 768p, 5 s clip | 20–40 min | **57 min** | 1.4–2.9× too optimistic |
+| Canvas scaling | "6–8× faster than trained canvas" at 512x288 | **~73×** | badly wrong |
 
-The pattern: small canvases were far *better* than predicted and large ones
-about as predicted, because the estimate scaled on **pixel count** while the real
-cost scales on **tokens squared**. Any single-point extrapolation from a published
-benchmark inherits that error. The 96 s result also shows the "not an iteration
-loop" conclusion was wrong at small canvas — it is a perfectly comfortable loop
-below ~30k tokens.
+The pattern: small canvases came in far *better* than predicted and the large one
+*worse*, because the estimate scaled on **pixel count** while real cost scales on
+tokens to the ~2.2. That error compounds in both directions from wherever the
+anchor benchmark sat. Any single-point extrapolation inherits it.
+
+The 96 s result also shows the "not an iteration loop" conclusion was wrong at
+small canvas — it is a perfectly comfortable loop below ~30k tokens. The "start
+it before bed" framing turns out to be right only for the trained canvas.
+
+Worth noting the in-flight estimates were not much better: during this work the
+768p run was predicted at ~40 min from a two-point quadratic fit and came in at
+57. The lesson is the same one twice — **measure the canvas you intend to use.**
 
 ## Weights actually in use
 
@@ -325,24 +347,33 @@ does not actually contain). Prefer it if you are starting fresh.
 
 ## Open threads
 
-1. **Attention backend.** ComfyUI logs "Using pytorch attention", and the
-   measured scaling is almost perfectly quadratic — which is what an *unfused*
-   attention path looks like. This is no longer needed to explain 768p (the token
-   math alone does that), but it is the most promising remaining speedup: a fused
-   kernel would attack the quadratic term directly, which is exactly where the
-   cost is. Worth trying ComfyUI's alternate cross-attention flags and measuring
-   the exponent again.
+1. **Attention backend.** ComfyUI logs "Using pytorch attention". Whether a
+   fused kernel is dispatching is still unknown, and it remains the most
+   promising untried speedup — worth testing ComfyUI's alternate cross-attention
+   flags and comparing the *constant*.
+
+   **The measured exponent says nothing about this.** FlashAttention and friends
+   are O(N²) in time too — they avoid materializing the N×N score matrix, which
+   is a memory win, but every score still gets computed. Quadratic time is what
+   *correct* attention looks like at any level of fusion; fusion moves the
+   constant. An earlier version of this file inferred "quadratic, therefore
+   unfused", which does not follow.
 2. **Unpruned weights.** Everything measured here uses *pruned* community
    conversions, so output quality does not represent official H3.
    `Comfy-Org/MiniMax-H3` ships unpruned bf16 (66GB) and int8 (34GB) variants.
-3. **Finish a 1344x768 run.** Now predicted at ~40 min rather than "impossible".
-   Worth doing once to confirm the quadratic model holds at 125k tokens and to
-   see the trained canvas at its intended resolution.
-4. **Pin down the exponent properly.** The quadratic fit rests on two
-   sampler-rate points. `probe_comfy.py` records wall time only; parsing the
-   tqdm s/it out of the ComfyUI log into `timings.jsonl` would make every run
-   contribute a comparable number, and a third and fourth canvas would show
-   whether the exponent is really 2.0 or just near it.
+3. ~~**Finish a 1344x768 run.**~~ **Done — 56 min 47 s.** It did not confirm the
+   quadratic model, it broke it: the exponent is ~2.3, not 2.0.
+4. **Pin down the exponent properly.** Three sampler-rate points fit a power law
+   with exponent 2.2, but the pairwise exponents drift upward (2.27 then 2.32),
+   so a single exponent is probably the wrong shape. `probe_comfy.py` records
+   wall time only — parsing the tqdm s/it out of the ComfyUI log into
+   `timings.jsonl` would make every run contribute a comparable number for free.
+   A point above 125k tokens (longer clips, since 1344x768 is the canvas ceiling)
+   would show whether the drift continues.
+5. **Where does the super-quadratic term come from?** The cache-spill theory is
+   untested. `rocperf`/`rocprof` counters on a small vs large canvas would show
+   whether L2 hit rate collapses as the sequence grows, which would confirm it
+   and suggest whether a tiled attention implementation could recover the loss.
 
 `run_probe.py` targets the diffusers path, which was abandoned before it ever
 ran. It is kept for reference only and has never been executed.
