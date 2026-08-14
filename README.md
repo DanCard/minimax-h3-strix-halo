@@ -276,7 +276,7 @@ Fetched by `fetch_quant.py` into the default HF cache (~44GB):
 | File | Size | Notes |
 |---|---|---|
 | `MiniMax_H3_FL2VA_pruned_int8_convrot.safetensors` | 21.0 GB | Transformer, int8, highest-quality pruned variant |
-| `qwen3vl_32b_minimax_h3_int4_convrot.safetensors` | 15.0 GB | Text encoder. The repo guide recommends int8 but only int4/nvfp4 exist |
+| `qwen3vl_32b_minimax_h3_int4_convrot.safetensors` | 15.0 GB | Text encoder. Abiray's guide recommends int8 but only ships int4/nvfp4; `Comfy-Org/MiniMax-H3` does have int8 (27GB), tested and indistinguishable — int4 is the better trade |
 | `minimax_h3_video_vae_fp16.safetensors` | 5.2 GB | |
 | `minimax_h3_audio_vae_fp32.safetensors` | 0.6 GB | |
 | `minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors` | 2.0 GB | **4-step turbo LoRA** |
@@ -417,19 +417,26 @@ does not actually contain). Prefer it if you are starting fresh.
 
 ### Quality levers: only resolution worked
 
-Four levers were tested against a fixed control — 384x640, 124 frames, seed 42,
-`res_multistep`/`simple`, identical prompt — changing exactly one variable each
-time. Detail is mean Laplacian variance over sampled frames, all clips rescaled
-to a common display size so that real extra detail shows up as extra variance
-rather than as a larger pixel count.
+Five levers were tested against a fixed control, changing exactly one variable
+each time. Detail is mean Laplacian variance over sampled frames, all clips
+rescaled to a common display size so that real extra detail shows up as extra
+variance rather than as a larger pixel count — but see the warning below about
+how far that number can be trusted.
 
 | Change | Detail | vs. control | Verdict |
 |---|---|---|---|
 | 4 steps, turbo LoRA (control) | 307.1 | — | — |
 | 8 steps, turbo LoRA | 251.6 | −18% | slightly worse |
 | **20 steps, no LoRA** | 85.5 | **−72%** | **much worse** |
-| Unpruned int8 (34GB vs 21GB) | 278.1 | −9.5% | indistinguishable |
+| Unpruned int8 diffusion (34GB vs 21GB) | 278.1 | −9.5% | indistinguishable |
+| **int8 text encoder (27GB vs int4 15GB)** | — | — | **indistinguishable** |
+| Scheduler (6 swept) | — | — | small win — `sgm_uniform` |
 | **768x1344 vs 384x640** | — | **9.1x** | **decisive** |
+
+**Every component swap came back negative.** Only resolution moved the needle,
+and the scheduler was worth a small free improvement. The generation-side search
+is effectively exhausted: each component is either already at its best setting
+or demonstrably irrelevant.
 
 - **Step count is not the lever.** Dropping the turbo LoRA and running 20 steps
   produced 3.6x *less* detail, corroborated independently by file size (392KB vs
@@ -441,8 +448,24 @@ rather than as a larger pixel count.
   1.5x the per-step cost (31.7 vs 21.0 s/it — the weights are 1.62x larger and
   small canvases are weight-bandwidth bound). One seed only, so this rules out a
   *large* effect, not a small one.
+- **Quantizing the text encoder to int4 costs nothing measurable.** int8
+  (27GB) against the int4 (15GB) in use, at 448x704 with `sgm_uniform`: both
+  rendered the same prompt detail — including a "bright blue eyes" term added
+  specifically to give a fine attribute to lose — with comparable rendering and
+  no consistent winner. This was the most suspicious component left, on the
+  reasoning that int4 on a 32B model is where damage usually shows. It is not:
+  a text prompt is a short, low-bandwidth conditioning signal, so there is
+  little for the extra precision to preserve. **Stay on int4** — 12GB smaller
+  and faster to load, for no measurable cost. The encoder runs once per
+  generation, not per step, so it cannot affect the sampling rate either way.
 - **Resolution is the lever.** 9.1x the fine detail from 384x640 to 768x1344,
   and 2.85x at the 512x896 waypoint. Nothing else came close.
+
+What remains is no longer parameter tuning: post-processing (upscale plus frame
+interpolation, cheap but cosmetic) or `first_frame` conditioning anchored to a
+dedicated image model, which is the real remaining ceiling — image models are
+far better per unit of compute at a single frame than a video model is, so H3
+would only have to move a good subject rather than invent one.
 
 ### Scheduler: sgm_uniform, and a warning about measuring this
 
@@ -562,9 +585,11 @@ weight corruption above.
    declared end exactly equal to file size, no repair pass needed — confirming
    the corruption below is Abiray's upload tooling, not upstream. One seed only,
    so a small effect is not excluded; 3–4 seeds per arm would settle it. The
-   remaining untested variant is the **int8 text encoder** (27GB vs the int4
-   15.7GB in use), which is the most aggressively quantized component left and
-   drives both prompt understanding and image conditioning.
+   **int8 text encoder** (27GB vs the int4 15.7GB in use) was tested too, and is
+   likewise indistinguishable — so every quantized component in the stack has now
+   been checked against a higher-precision version and none of them is costing
+   measurable quality. Both A/Bs are single-seed, which rules out large effects
+   rather than small ones.
 3. ~~**Finish a 1344x768 run.**~~ **Done — 56 min 47 s**, and 768x1344 portrait
    in 58 min 21 s. It did not confirm the quadratic model, it broke it: the
    top-end exponent is ~2.3, not 2.0, and there is no single exponent at all.
