@@ -1,9 +1,9 @@
 # MiniMax-H3 on Strix Halo (gfx1151)
 
-Feasibility notes for running [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)
-locally on this machine. Nothing has been run yet — everything below is from
-documentation and third-party benchmarks. Timings are estimates until the probe
-is actually executed.
+Notes on running [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)
+locally on this machine. Timings below are measured on this hardware unless a
+section says otherwise; the pre-run estimates are kept at the bottom, clearly
+marked, because comparing them against reality is instructive.
 
 ## Status
 
@@ -14,31 +14,54 @@ is actually executed.
 
 All with the 4-step turbo LoRA, 124 frames (5.17s @ 24fps), joint video+audio:
 
-| Canvas | Pixels | s/step | Total | Notes |
-|---|---|---|---|---|
-| 512x288 | 147k | 11.2 | **96 s** | models already resident |
-| 384x640 | 246k | 57.1 | **228 s** | includes ~45s model reload |
-| 1344x768 | 1032k | **>16 min** | abandoned | trained canvas; killed after 20+ min on step 1 |
+| Canvas | Pixels | Tokens | Sampler s/it | Wall total | Notes |
+|---|---|---|---|---|---|
+| 512x288 | 147k | 17.9k | **11.2** | 96 s | models already resident |
+| 384x640 | 246k | 29.8k | not recorded | 228 s | includes ~45s model reload |
+| 896x512 | 459k | 55.6k | **123–126** | 571 s | step-to-step gap, steady across all 4 |
+| 1344x768 | 1032k | 125k | ~550 (est.) | ~40 min (est.) | trained canvas; abandoned partway, see below |
 
 A 22-frame (0.92s) clip at 512x288 sampled in 6.6 s.
 
-**Resolution is the expensive axis, not steps.** Attention is quadratic in token
-count, and tokens scale with pixels x frames:
+**Resolution is the expensive axis, not steps, and the scaling looks close to
+quadratic in token count.** Tokens are the latent grid, `W/16 x H/16 x 31` at
+124 frames:
 
-| Canvas | Latent grid | Tokens |
-|---|---|---|
-| 512x288, 124f | 32x18x31 | ~17.9k |
-| 1344x768, 124f | 84x48x31 | ~125k |
+| Canvas | Latent grid | Tokens | vs. baseline | Sampler s/it | vs. baseline |
+|---|---|---|---|---|---|
+| 512x288, 124f | 32x18x31 | ~17.9k | 1.00x | 11.2 | 1.00x |
+| 896x512, 124f | 56x32x31 | ~55.6k | 3.11x | ~124 | **9.93x** |
 
-7x the pixels, but up to ~49x the attention work. The turbo LoRA cuts *how many*
-steps run; it cannot touch what each step costs. Full 768p was still on step 1
-of 4 after 16 minutes with the GPU pegged at 100% and VRAM at 96%, which also
-suggests no memory-efficient attention backend is dispatching on gfx1151
-(ComfyUI logs "Using pytorch attention"). Untested lever: ComfyUI's alternate
-attention flags.
+3.11² = 9.7 predicted against 9.93 measured, giving:
 
-**Practical envelope: 384x640 or smaller is an interactive loop (~3 min/clip
-with models resident). Full 768p is not usable on this hardware as configured.**
+```
+s/step ≈ 11.2 × (tokens / 17.9k)²
+```
+
+**Two caveats on that fit.** It rests on two sampler-rate points, and the
+512x288 baseline is the shakier of them — at that size a larger share of any
+wall-clock measurement is fixed overhead. 384x640 is deliberately excluded: only
+its wall time was recorded, and wall time folds in text encode, VAE decode and
+mux, so it is not comparable to a sampler rate. (Wall/4 there is ~46 s/it against
+~31 predicted — the gap is overhead, not a scaling failure, but it cannot be used
+as evidence either way.) Treat the formula as a good planning heuristic that
+happens to fit two clean points, not as a confirmed exponent. See open thread 4.
+
+The turbo LoRA cuts *how many* steps run; it cannot touch what each step costs.
+
+**On the abandoned 1344x768 run.** An earlier version of this file called that a
+memory cliff — GPU pegged at 100%, VRAM at 96%, still on step 1 of 4 after 16
+minutes — and inferred that no memory-efficient attention backend was dispatching
+on gfx1151. **That reading was wrong.** The formula above predicts ~9 min/step at
+125k tokens, and a first step of >16 min including MIOpen autotune for unseen
+shapes is consistent with it. Nothing fell over; the run was simply slow, and
+would have finished in roughly 40 minutes. It was killed for impatience, not
+failure. 768p is expensive here, not broken.
+
+**Practical envelope:** 384x640 and below is an interactive loop (~2-4 min/clip
+with models resident). 896x512 at ~9.5 min is a reasonable quality/time
+compromise. Full 1344x768 is a ~40 min "start it and walk away" proposition —
+slow, but a known quantity rather than a wall.
 
 Two things are measured rather than assumed:
 
@@ -92,10 +115,17 @@ together. No separate vocoder.
 These are not API validation you can bypass — they're enforced in the pipeline
 blocks and the VAE geometry.
 
-1. **Minimum 124 frames (~5.17 s).** `num_frames` snaps up to the next
-   `17n + 5` the video VAE can decode, and the resulting duration must land in
-   5–15 s. `17×7+5 = 124` is the floor. **A 1-second or few-frame render is not
-   possible.** Every official example uses `num_frames=124`.
+1. **Minimum 124 frames (~5.17 s) — in diffusers only.** `num_frames` snaps up
+   to the next `17n + 5` the video VAE can decode, and the diffusers pipeline
+   additionally requires the resulting duration to land in 5–15 s, making
+   `17×7+5 = 124` the floor there. Every official example uses `num_frames=124`.
+
+   **ComfyUI does not enforce the 5-second floor.**
+   `EmptyMiniMaxH3LatentAV` takes `length` down to 5 on the same `17n+5` grid,
+   and a 22-frame (0.92 s) clip renders fine — measured above at 6.6 s of
+   sampling. Sub-124-frame lengths are off-distribution (the model was trained at
+   ~124–362) so quality suffers, but they run, which makes them the cheapest way
+   to time a configuration.
 2. **No CFG lever.** The released checkpoints are guidance-distilled — guidance
    is baked into the weights. There is no `guidance_scale`, no `negative_prompt`,
    no guider, and every step is exactly one forward pass. The usual 2× win from
@@ -108,16 +138,23 @@ blocks and the VAE geometry.
 
 | Lever | Effect | Notes |
 |---|---|---|
-| Canvas size | **960×544 is ~2.3× faster/step than 1344×768** (documented) | Biggest lever. Halving pixels bought 2.3×, so slightly better than linear |
-| `num_inference_steps` | Linear | Exposed in diffusers; *not* in the HTTP API |
-| Duration | Linear-ish | Only 5.17 s → 15 s of range; floor is already the fast end |
+| Canvas size | **~Quadratic in tokens** — measured 9.93× cost for 3.11× tokens | By far the biggest lever |
+| `num_inference_steps` | Linear | Exposed in diffusers; *not* in the HTTP API. Turbo LoRA already puts this at 4 |
+| Duration | Linear-ish in frames, which are linear in tokens | 5.17 s is already the fast end of the diffusers range; ComfyUI goes lower |
 
-Extrapolating the canvas curve, 512×288 (0.14× the trained pixels) should be
-roughly 6–8× faster per step than the trained canvas.
+Note the measured quadratic disagrees with MiniMax's own documentation, which
+reports 960×544 as ~2.3× faster per step than 1344×768. Those canvases differ by
+1.98× in tokens, so quadratic scaling predicts ~3.9×. The likely explanation is
+that the reference deployment runs a proper fused-attention kernel where the
+quadratic term is far better amortized; on the pytorch attention path here it is
+not. **Don't port MiniMax's canvas/time ratios to this hardware — they are
+optimistic.**
 
-## Expected timings
+## Pre-run estimates (superseded — kept for calibration)
 
-No H3-on-gfx1151 numbers have been published. These are extrapolations.
+Everything in this section was written *before* anything ran. It is preserved
+because the errors are large and instructive; see "How the estimates did" at the
+end of it. **Use the measured table at the top of this file, not these numbers.**
 
 Published H3 benchmarks on discrete NVIDIA cards:
 
@@ -143,6 +180,21 @@ For context, MiniMax's own reference deployment is `--num-gpus 4
 resolution, and video prompting normally takes several attempts. This is a
 "start it before bed" tool, not an iteration loop. Comparable models on this
 exact hardware — LTX-2 does 10 s with audio in ~10 min — are far more livable.
+
+### How the estimates did
+
+| Claim | Predicted | Actual | |
+|---|---|---|---|
+| Minimal probe, 512x288 | 5–15 min | **96 s** | 3–9× too pessimistic |
+| Full 768p, 5 s clip | 20–40 min | ~40 min (est., never completed) | roughly right |
+| Canvas scaling | "6–8× faster than trained canvas" at 512x288 | **~49×** | badly wrong |
+
+The pattern: small canvases were far *better* than predicted and large ones
+about as predicted, because the estimate scaled on **pixel count** while the real
+cost scales on **tokens squared**. Any single-point extrapolation from a published
+benchmark inherits that error. The 96 s result also shows the "not an iteration
+loop" conclusion was wrong at small canvas — it is a perfectly comfortable loop
+below ~30k tokens.
 
 ## Weights actually in use
 
@@ -239,9 +291,16 @@ uv pip install --python ~/.venvs/minimax-h3/bin/python -r /tmp/r.txt
 cd ComfyUI && HSA_USE_SVM=0 python main.py --listen 127.0.0.1 --port 8188
 
 # 6. generate
-python probe_comfy.py --width 384 --height 640 --length 124 --steps 4 \
+#    fast iteration (~96 s):
+python probe_comfy.py --width 512 --height 288 --length 124 --steps 4 \
+  --seed 7 --tag quick --prompt "..."
+#    quality/time compromise (~9.5 min):
+python probe_comfy.py --width 896 --height 512 --length 124 --steps 4 \
   --seed 7 --tag demo --prompt "..."
 ```
+
+Width and height must be multiples of 32. Every run appends a row to
+`timings.jsonl`.
 
 ### The weights are corrupt as published
 
@@ -266,15 +325,24 @@ does not actually contain). Prefer it if you are starting fresh.
 
 ## Open threads
 
-1. **Attention backend.** ComfyUI logs "Using pytorch attention". If SDPA is
-   falling back to the math path at ~125k tokens on gfx1151, that would explain
-   why 768p is far slower than the token math predicts. Try ComfyUI's alternate
-   cross-attention flags before concluding 768p is impossible here.
+1. **Attention backend.** ComfyUI logs "Using pytorch attention", and the
+   measured scaling is almost perfectly quadratic — which is what an *unfused*
+   attention path looks like. This is no longer needed to explain 768p (the token
+   math alone does that), but it is the most promising remaining speedup: a fused
+   kernel would attack the quadratic term directly, which is exactly where the
+   cost is. Worth trying ComfyUI's alternate cross-attention flags and measuring
+   the exponent again.
 2. **Unpruned weights.** Everything measured here uses *pruned* community
    conversions, so output quality does not represent official H3.
    `Comfy-Org/MiniMax-H3` ships unpruned bf16 (66GB) and int8 (34GB) variants.
-3. **Middle canvas.** 960x544 is untested and sits between the usable 384x640
-   and the unusable 1344x768.
+3. **Finish a 1344x768 run.** Now predicted at ~40 min rather than "impossible".
+   Worth doing once to confirm the quadratic model holds at 125k tokens and to
+   see the trained canvas at its intended resolution.
+4. **Pin down the exponent properly.** The quadratic fit rests on two
+   sampler-rate points. `probe_comfy.py` records wall time only; parsing the
+   tqdm s/it out of the ComfyUI log into `timings.jsonl` would make every run
+   contribute a comparable number, and a third and fourth canvas would show
+   whether the exponent is really 2.0 or just near it.
 
 `run_probe.py` targets the diffusers path, which was abandoned before it ever
 ran. It is kept for reference only and has never been executed.
