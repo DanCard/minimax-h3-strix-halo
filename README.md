@@ -17,14 +17,23 @@ All with the 4-step turbo LoRA, 124 frames (5.17s @ 24fps), joint video+audio:
 | Canvas | Pixels | Tokens | Sampler s/it | Wall total | Notes |
 |---|---|---|---|---|---|
 | 512x288 | 147k | 17.9k | **11.2** | 96 s | models already resident |
-| 384x640 | 246k | 29.8k | not recorded | 228 s | includes ~45s model reload |
+| 384x640 | 246k | 29.8k | **21.0** | 228 s | s/it from a later fresh-server run |
 | 896x512 | 459k | 55.6k | **123–126** | 571 s | step-to-step gap, steady across all 4 |
+| 512x896 | 459k | 55.6k | **128 → 176** | 12 min 26 s | portrait; drifted upward, aged server |
 | 1344x768 | 1032k | 125k | **766–858** | **56 min 47 s** | trained canvas, completed |
+| 768x1344 | 1032k | 125k | **811–823** | **58 min 21 s** | trained canvas in portrait; flat |
 
 A 22-frame (0.92s) clip at 512x288 sampled in 6.6 s.
 
-**The trained canvas works.** 1344x768 is not out of reach on this hardware — it
-is just a ~1 hour job for a 5.17 s clip.
+**The trained canvas works, in either orientation.** 1344x768 and 768x1344 are
+not out of reach on this hardware — each is just a ~1 hour job for a 5.17 s clip.
+
+**Transposing a canvas is free.** 512x896 and 896x512 have identical token
+counts, as do 768x1344 and 1344x768 — attention cost depends only on sequence
+length. Confirmed twice: 512x896 opened at 128 s/it against 896x512's measured
+123–126, and 768x1344 averaged 819 s/it against 1344x768's ~814, a 0.6% gap.
+A measured landscape run is therefore a reliable predictor of its portrait twin,
+which is the single most useful estimating trick in this file.
 
 **Resolution is the expensive axis, not steps, and it scales worse than
 quadratically.** Tokens are the latent grid, `W/16 x H/16 x 31` at 124 frames:
@@ -32,25 +41,31 @@ quadratically.** Tokens are the latent grid, `W/16 x H/16 x 31` at 124 frames:
 | Canvas | Latent grid | Tokens | vs. baseline | Sampler s/it | vs. baseline | Pairwise exponent |
 |---|---|---|---|---|---|---|
 | 512x288, 124f | 32x18x31 | ~17.9k | 1.00x | 11.2 | 1.00x | — |
-| 896x512, 124f | 56x32x31 | ~55.6k | 3.11x | ~124 | 11.1x | **2.27** |
-| 1344x768, 124f | 84x48x31 | ~125k | 7.00x | ~814 | 72.7x | **2.32** |
+| 384x640, 124f | 24x40x31 | ~29.8k | 1.66x | 21.0 | 1.9x | **1.24** |
+| 896x512, 124f | 56x32x31 | ~55.6k | 3.10x | ~124 | 11.1x | **2.85** |
+| 768x1344, 124f | 48x84x31 | ~125k | 6.98x | ~819 | 73.1x | **2.33** |
 
-A log-log fit across all three points gives:
+**There is no single exponent.** An earlier version of this file fitted
+`^2.2` across three points and reported the pairwise exponents as "drifting
+upward" (2.27 then 2.32). Adding a fourth point breaks that story outright: the
+pairwise exponents are **1.24, 2.85, 2.33** — non-monotonic, spanning more than
+a factor of two. The tidy power law was an artefact of having too few points.
 
-```
-s/step ≈ 11.2 × (tokens / 17.9k)^2.2
-```
+The honest summary:
 
-**The exponent is ~2.2–2.3 and drifting upward, not 2.0.** Pure attention would
-be exactly quadratic; the excess means the constant itself degrades as the
-sequence grows — consistent with attention tiles falling out of cache on an iGPU
-that shares system memory bandwidth. Practical consequence: **extrapolating from
-small canvases under-predicts large ones.** Treat 2.2 as a floor, not a law, and
-expect the error to grow beyond 125k tokens.
+- **At the top end, ~2.3 holds and extrapolates well.** It is the only region
+  with enough signal to trust for planning.
+- **At the low end the measurement noise swamps the effect.** The same 384x640
+  canvas measured 21.0 s/it on a fresh server and 27.8 s/it on an aged one — a
+  32% spread, larger than the gap between neighbouring canvases. Sub-30k-token
+  points cannot resolve an exponent at all.
+- **Every timing in this file carries server age as an unrecorded confound**
+  (see *Server age, not run length* below). Numbers taken on a fresh server and
+  a tired one are not comparable, and earlier runs did not track which.
 
-384x640 is deliberately excluded from the fit: only its wall time was recorded,
-and wall time folds in text encode, VAE decode and mux, so it is not comparable
-to a sampler rate.
+Practical consequence: **anchor to the nearest measured point, and prefer a
+transpose anchor over any exponent.** Extrapolation across more than ~2x in
+tokens is guesswork.
 
 The turbo LoRA cuts *how many* steps run; it cannot touch what each step costs.
 
@@ -68,13 +83,33 @@ wrong.** The completed run settles it — during it:
 Nothing degrades and nothing falls over. The original attempt was killed for
 impatience, not failure. 768p is expensive here, not broken.
 
+**Server age, not run length, is what slows a run down.** Per-step times drift
+upward *within* a run, but only on a server that has already done work:
+
+| Run | Server state | Per-step |
+|---|---|---|
+| 512x896, 4 steps | ~5 runs deep, 94% VRAM | 128 → **176 s** (+38%) |
+| 384x640, 20 steps | 2 runs deep | 27.8 s, flat across all 20 |
+| 768x1344, 4 steps | **freshly restarted** | 812.7 / 810.8 / 813.2 / 823.1 s, flat |
+
+The 768x1344 run is the decisive one: three times longer and 2.25x the tokens of
+the run that drifted 38%, yet dead flat for 55 minutes. So the drift is **not** a
+function of run length, canvas size or thermals (the GPU idles at 36 °C) — it
+tracks how much work the *process* has already done, i.e. allocator
+fragmentation of the GTT/VRAM carve-out.
+
+**Restart ComfyUI before any long or timed run.** It costs ~45 s and it is the
+difference between a predictable number and a lottery. It is also a precondition
+for any timing worth recording.
+
 **Practical envelope:**
 
 | Canvas | Time | Use |
 |---|---|---|
 | 512x288 | ~1.5 min | prompt iteration |
-| 896x512 | ~9.5 min | quality/time sweet spot — 6x cheaper than 768p |
-| 1344x768 | ~57 min | final render, start it and walk away |
+| 384x640 | ~4 min | cheap A/B tests |
+| 896x512 / 512x896 | ~9.5 min | quality/time sweet spot — 6x cheaper than 768p |
+| 1344x768 / 768x1344 | ~58 min | final render, start it and walk away |
 
 Two things are measured rather than assumed:
 
@@ -151,13 +186,13 @@ blocks and the VAE geometry.
 
 | Lever | Effect | Notes |
 |---|---|---|
-| Canvas size | **Tokens^2.2** — measured 72.7× cost for 7.0× tokens | By far the biggest lever |
-| `num_inference_steps` | Linear | Exposed in diffusers; *not* in the HTTP API. Turbo LoRA already puts this at 4 |
-| Duration | Linear-ish in frames, which are linear in tokens | 5.17 s is already the fast end of the diffusers range; ComfyUI goes lower |
+| Canvas size | **~Tokens^2.3 at the top end** — measured 73× cost for 7.0× tokens | By far the biggest lever, and the only one that improved quality |
+| `num_inference_steps` | Linear | Exposed in diffusers; *not* in the HTTP API. Turbo LoRA already puts this at 4, and raising it made output *worse* |
+| Duration | Linear in tokens, same as pixels | Frames and pixels are the same currency: 768x1344 at 15 s is ~363k tokens, a ~10 hour job |
 
 Note the measured scaling disagrees sharply with MiniMax's own documentation,
 which reports 960×544 as ~2.3× faster per step than 1344×768. Those canvases
-differ by 1.98× in tokens; the exponent measured here predicts ~4.3×.
+differ by 1.98× in tokens; the top-end exponent measured here predicts ~4.5×.
 
 Real per-step cost is `a·N + b·N^k` — projections and MLPs are linear, attention
 superlinear. On a deployment where `b` is small (fused kernels, dedicated HBM),
@@ -214,9 +249,25 @@ The 96 s result also shows the "not an iteration loop" conclusion was wrong at
 small canvas — it is a perfectly comfortable loop below ~30k tokens. The "start
 it before bed" framing turns out to be right only for the trained canvas.
 
-Worth noting the in-flight estimates were not much better: during this work the
-768p run was predicted at ~40 min from a two-point quadratic fit and came in at
-57. The lesson is the same one twice — **measure the canvas you intend to use.**
+The in-flight estimates were not much better. A running tally:
+
+| In-flight estimate | Predicted | Actual | |
+|---|---|---|---|
+| 1344x768, from a 2-point quadratic fit | ~40 min | **56:47** | 1.4× optimistic |
+| 512x896, from the 896x512 transpose | 9.5–10 min | **12:26** | 1.3× optimistic |
+| 8 steps at 384x640, from a stale baseline | ~7 min | **3:39** | 1.9× pessimistic |
+| **768x1344, from the 1344x768 transpose** | **~55 min** | **58:21** | **1.06×** |
+
+Two lessons, and they point the same way. The 512x896 miss was not the transpose
+anchor's fault — the sampler rate it predicted was right — but the VAE
+decode/mux overhead was 133 s, not the 30–45 s carried over from far smaller
+canvases; **overhead scales with pixels x frames too.** The 8-step miss came
+from anchoring to a baseline measured on an aged server.
+
+The one estimate that landed used a **same-token-count transpose anchor on a
+freshly restarted server**, with overhead taken from a comparable canvas. That
+is the recipe: **measure the canvas you intend to use, control the server state,
+and never extrapolate more than ~2x in tokens.**
 
 ## Weights actually in use
 
@@ -334,7 +385,14 @@ Width and height must be multiples of 32. Every run appends a row to
 `timings.jsonl`. `--image`/`--last-image` add first/last-frame conditioning;
 each is scaled to the canvas with a centre crop, because the node itself
 plain-stretches whatever it receives. `--outdir` saves into a subdirectory of
-`ComfyUI/output/`.
+`ComfyUI/output/`. `--unet` and `--clip` switch the diffusion model and text
+encoder by filename, for A/B tests; both are recorded in `timings.jsonl`
+alongside the scheduler and LoRA strength, without which ablation rows are
+indistinguishable afterwards.
+
+Defaults worth knowing: **`sgm_uniform`** scheduler (chosen by sweep, see below),
+`res_multistep` sampler, 4 steps with the turbo LoRA at strength 1.0. Raising
+the step count makes output *worse*, not better — the LoRA is trained for 4.
 
 ### The weights are corrupt as published
 
@@ -356,6 +414,76 @@ the truncated Abiray file is **sha256-identical** to it.
 `Comfy-Org/MiniMax-H3` is the authoritative ComfyUI repackaging and ships the
 same files uncorrupted (plus an int8 text encoder Abiray's README recommends but
 does not actually contain). Prefer it if you are starting fresh.
+
+### Quality levers: only resolution worked
+
+Four levers were tested against a fixed control — 384x640, 124 frames, seed 42,
+`res_multistep`/`simple`, identical prompt — changing exactly one variable each
+time. Detail is mean Laplacian variance over sampled frames, all clips rescaled
+to a common display size so that real extra detail shows up as extra variance
+rather than as a larger pixel count.
+
+| Change | Detail | vs. control | Verdict |
+|---|---|---|---|
+| 4 steps, turbo LoRA (control) | 307.1 | — | — |
+| 8 steps, turbo LoRA | 251.6 | −18% | slightly worse |
+| **20 steps, no LoRA** | 85.5 | **−72%** | **much worse** |
+| Unpruned int8 (34GB vs 21GB) | 278.1 | −9.5% | indistinguishable |
+| **768x1344 vs 384x640** | — | **9.1x** | **decisive** |
+
+- **Step count is not the lever.** Dropping the turbo LoRA and running 20 steps
+  produced 3.6x *less* detail, corroborated independently by file size (392KB vs
+  695KB — H.264 encodes soft video small). 8 steps was mildly worse than 4,
+  consistent with the LoRA being trained for exactly 4. The model is
+  guidance-distilled at the base, so removing the LoRA does not restore CFG; it
+  just samples a schedule nothing was tuned for.
+- **Pruning is not the lever.** Unpruned int8 landed within noise of pruned, at
+  1.5x the per-step cost (31.7 vs 21.0 s/it — the weights are 1.62x larger and
+  small canvases are weight-bandwidth bound). One seed only, so this rules out a
+  *large* effect, not a small one.
+- **Resolution is the lever.** 9.1x the fine detail from 384x640 to 768x1344,
+  and 2.85x at the 512x896 waypoint. Nothing else came close.
+
+### Scheduler: sgm_uniform, and a warning about measuring this
+
+Six schedulers at 448x704, seed 42, `res_multistep`, 4 steps, one variable:
+
+| Scheduler | Verdict |
+|---|---|
+| **`sgm_uniform`** | **Best — now the default.** Natural tone, slightly better hair separation and cleaner background than `simple` |
+| `simple` | Clean; the previous default |
+| `beta` | Harsh — crushed shadows, blown highlights, waxy skin |
+| `kl_optimal` | Overcooked — oversaturated and painterly |
+| `linear_quadratic` | **Broken** — posterized and solarized |
+| `normal` | **Broken** — blocky coloured noise |
+
+`karras` and `exponential` were skipped deliberately: both shape sigmas for the
+variance-exploding formulation and H3 is flow-matching.
+
+The win is small but free — same step count, same cost, better default forever.
+
+**The detail metric failed completely here, and that is the more useful
+finding.** Ranked by mean Laplacian variance, the top two results were
+`linear_quadratic` (5.41x the control) and `normal` (4.96x) — *the two broken
+ones*. The metric counted posterization and colour noise as detail. Two distinct
+traps, both worth knowing before trusting any automated image score:
+
+- **Contrast masquerades as detail.** `beta` scored 1.69x purely by having
+  higher contrast (61.3 vs 55.1 in the same table). Crushed blacks and blown
+  highlights raise high-frequency energy without resolving anything.
+- **A different schedule produces a different *composition*.** Changing the
+  scheduler changes the denoising trajectory, so the camera push-in lands
+  elsewhere and the subject's apparent size changes. Judged as thumbnails, the
+  more zoomed-in variant looks sharper. That is framing, not fidelity.
+
+A frame-to-frame difference column was the only automated signal that caught it:
+the broken runs showed ~3x the motion of the good ones, which is noise, not
+movement.
+
+**Use it only for gross differences.** It is trustworthy at the 3.6x and 9.1x
+gaps above and actively misleading below roughly 2x. For anything subtle, pull
+native-resolution crops and look — a labelled contact sheet takes about twenty
+seconds and would have prevented the wrong call here.
 
 ### Image conditioning segfaults: a MIOpen Conv3d bug
 
@@ -428,18 +556,29 @@ weight corruption above.
    *correct* attention looks like at any level of fusion; fusion moves the
    constant. An earlier version of this file inferred "quadratic, therefore
    unfused", which does not follow.
-2. **Unpruned weights.** Everything measured here uses *pruned* community
-   conversions, so output quality does not represent official H3.
-   `Comfy-Org/MiniMax-H3` ships unpruned bf16 (66GB) and int8 (34GB) variants.
-3. ~~**Finish a 1344x768 run.**~~ **Done — 56 min 47 s.** It did not confirm the
-   quadratic model, it broke it: the exponent is ~2.3, not 2.0.
-4. **Pin down the exponent properly.** Three sampler-rate points fit a power law
-   with exponent 2.2, but the pairwise exponents drift upward (2.27 then 2.32),
-   so a single exponent is probably the wrong shape. `probe_comfy.py` records
-   wall time only — parsing the tqdm s/it out of the ComfyUI log into
-   `timings.jsonl` would make every run contribute a comparable number for free.
-   A point above 125k tokens (longer clips, since 1344x768 is the canvas ceiling)
-   would show whether the drift continues.
+2. ~~**Unpruned weights.**~~ **Tested — no measurable difference.** Unpruned int8
+   (34GB, `Comfy-Org/MiniMax-H3`) landed within noise of the pruned 21GB file at
+   1.5x the per-step cost. Comfy-Org's copies are also *clean*: 1036 tensors,
+   declared end exactly equal to file size, no repair pass needed — confirming
+   the corruption below is Abiray's upload tooling, not upstream. One seed only,
+   so a small effect is not excluded; 3–4 seeds per arm would settle it. The
+   remaining untested variant is the **int8 text encoder** (27GB vs the int4
+   15.7GB in use), which is the most aggressively quantized component left and
+   drives both prompt understanding and image conditioning.
+3. ~~**Finish a 1344x768 run.**~~ **Done — 56 min 47 s**, and 768x1344 portrait
+   in 58 min 21 s. It did not confirm the quadratic model, it broke it: the
+   top-end exponent is ~2.3, not 2.0, and there is no single exponent at all.
+4. **Pin down the exponent properly.** A fourth point killed the single-exponent
+   fit outright — pairwise exponents are now 1.24, 2.85, 2.33, non-monotonic.
+   Two fixes are needed before more points help. First, **control for server
+   age**: the same canvas measured 21.0 and 27.8 s/it depending on it, a spread
+   wider than the effect being measured, so every run needs a fresh restart to
+   be comparable. Second, `probe_comfy.py` still records wall time only —
+   parsing the tqdm s/it out of the ComfyUI log into `timings.jsonl` would make
+   every run contribute a comparable number for free. A point above 125k tokens
+   needs longer clips, since 1344x768 is the canvas ceiling: 448x704 at 362
+   frames is ~111k tokens and ~43 min, and 512x896 at 362 frames is ~161k but
+   untested against the 89% VRAM ceiling the 125k runs already reach.
 5. **Where does the super-quadratic term come from?** The cache-spill theory is
    untested. `rocperf`/`rocprof` counters on a small vs large canvas would show
    whether L2 hit rate collapses as the sequence grows, which would confirm it

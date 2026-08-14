@@ -69,9 +69,9 @@ def build_workflow(a):
     prefix = f"{a.outdir.strip('/')}/h3-{a.tag}" if a.outdir else f"h3-{a.tag}"
     wf = {
         "1": {"class_type": "UNETLoader",
-              "inputs": {"unet_name": UNET, "weight_dtype": "default"}},
+              "inputs": {"unet_name": a.unet, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader",
-              "inputs": {"clip_name": CLIP, "type": "minimax", "device": "default"}},
+              "inputs": {"clip_name": a.clip, "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": VAE_VIDEO}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": VAE_AUDIO}},
         "6": {"class_type": "MiniMaxH3ImageToVideo",
@@ -145,8 +145,10 @@ def main():
     p.add_argument("--prompt", default=DEFAULT_PROMPT)
     p.add_argument("--tag", default="probe")
     p.add_argument("--outdir", help="subdirectory of ComfyUI/output/ to save into")
+    p.add_argument("--unet", default=UNET, help="diffusion model filename in models/diffusion_models/")
+    p.add_argument("--clip", default=CLIP, help="text encoder filename in models/text_encoders/")
     p.add_argument("--sampler", default="res_multistep")
-    p.add_argument("--scheduler", default="simple")
+    p.add_argument("--scheduler", default="sgm_uniform")
     p.add_argument("--lora", action="store_true", default=True, help="use 4-step turbo LoRA")
     p.add_argument("--no-lora", dest="lora", action="store_false")
     p.add_argument("--lora-strength", type=float, default=1.0)
@@ -211,8 +213,8 @@ def main():
     row = {"utc": datetime.now(timezone.utc).isoformat(), "tag": a.tag,
            "width": a.width, "height": a.height, "length": a.length,
            "duration_s": round(a.length / 24, 2), "steps": a.steps,
-           "lora": a.lora, "lora_strength": a.lora_strength if a.lora else None,
-           "sampler": a.sampler, "scheduler": a.scheduler, "outdir": a.outdir,
+           "lora": a.lora, "lora_strength": a.lora_strength if a.lora else None, "unet": a.unet,
+           "sampler": a.sampler, "scheduler": a.scheduler, "outdir": a.outdir, "clip": a.clip,
            "total_s": round(total, 1), "s_per_step": round(total / a.steps, 1),
            "outputs": outs}
     with open(HERE / "timings.jsonl", "a") as fh:
