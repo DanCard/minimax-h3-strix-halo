@@ -84,3 +84,4 @@ huggingface_token*
 *.swp
 .DS_Store
 Thumbs.db
+core.*

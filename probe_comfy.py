@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import json
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -52,8 +53,20 @@ def snap_length(n):
     return 5 + 17 * (((n - 5) // 17) + 1)
 
 
+def stage_image(path, dest_name):
+    """Copy an image into ComfyUI/input/ so LoadImage can find it by name."""
+    src = Path(path).expanduser().resolve()
+    if not src.is_file():
+        raise SystemExit(f"no such image: {src}")
+    dst = HERE / "ComfyUI" / "input" / dest_name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
+    return dest_name
+
+
 def build_workflow(a):
     """API-format graph. Keys are node ids, values are {class_type, inputs}."""
+    prefix = f"{a.outdir.strip('/')}/h3-{a.tag}" if a.outdir else f"h3-{a.tag}"
     wf = {
         "1": {"class_type": "UNETLoader",
               "inputs": {"unet_name": UNET, "weight_dtype": "default"}},
@@ -64,6 +77,7 @@ def build_workflow(a):
         "6": {"class_type": "MiniMaxH3ImageToVideo",
               "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": a.prompt,
                          "width": a.width, "height": a.height, "length": a.length}},
+        # 20-23: optional first/last frame conditioning, added below
         "7": {"class_type": "BasicGuider",
               "inputs": {"model": ["5", 0] if a.lora else ["1", 0], "conditioning": ["6", 0]}},
         "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": a.sampler}},
@@ -78,14 +92,33 @@ def build_workflow(a):
         "13": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
         "14": {"class_type": "CreateVideo",
                "inputs": {"images": ["12", 0], "audio": ["13", 0], "fps": 24.0}},
+        # SaveVideo treats a slash in the prefix as a subdirectory of ComfyUI/output/.
         "15": {"class_type": "SaveVideo",
-               "inputs": {"video": ["14", 0], "filename_prefix": f"h3-{a.tag}",
+               "inputs": {"video": ["14", 0], "filename_prefix": prefix,
                           "format": "auto", "codec": "auto"}},
     }
     if a.lora:
         wf["5"] = {"class_type": "LoraLoaderModelOnly",
                    "inputs": {"model": ["1", 0], "lora_name": LORA_TURBO,
                               "strength_model": a.lora_strength}}
+
+    # Image conditioning. Each image is loaded, then scaled to the exact canvas
+    # with a centre crop -- the node wants first/last frames at generation size,
+    # and an aspect mismatch otherwise shows up as squashing in the output.
+    if a.image:
+        name = stage_image(a.image, "h3_first_frame" + Path(a.image).suffix)
+        wf["20"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        wf["21"] = {"class_type": "ImageScale",
+                    "inputs": {"image": ["20", 0], "upscale_method": "lanczos",
+                               "width": a.width, "height": a.height, "crop": "center"}}
+        wf["6"]["inputs"]["first_frame"] = ["21", 0]
+    if a.last_image:
+        name = stage_image(a.last_image, "h3_last_frame" + Path(a.last_image).suffix)
+        wf["22"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        wf["23"] = {"class_type": "ImageScale",
+                    "inputs": {"image": ["22", 0], "upscale_method": "lanczos",
+                               "width": a.width, "height": a.height, "crop": "center"}}
+        wf["6"]["inputs"]["last_frame"] = ["23", 0]
     return wf
 
 
@@ -111,11 +144,14 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--prompt", default=DEFAULT_PROMPT)
     p.add_argument("--tag", default="probe")
+    p.add_argument("--outdir", help="subdirectory of ComfyUI/output/ to save into")
     p.add_argument("--sampler", default="res_multistep")
     p.add_argument("--scheduler", default="simple")
     p.add_argument("--lora", action="store_true", default=True, help="use 4-step turbo LoRA")
     p.add_argument("--no-lora", dest="lora", action="store_false")
     p.add_argument("--lora-strength", type=float, default=1.0)
+    p.add_argument("--image", help="first frame; image-to-video instead of text-to-video")
+    p.add_argument("--last-image", help="last frame; with --image this interpolates a transformation")
     a = p.parse_args()
 
     for n, v in (("width", a.width), ("height", a.height)):
@@ -175,7 +211,8 @@ def main():
     row = {"utc": datetime.now(timezone.utc).isoformat(), "tag": a.tag,
            "width": a.width, "height": a.height, "length": a.length,
            "duration_s": round(a.length / 24, 2), "steps": a.steps,
-           "lora": a.lora, "sampler": a.sampler, "scheduler": a.scheduler,
+           "lora": a.lora, "lora_strength": a.lora_strength if a.lora else None,
+           "sampler": a.sampler, "scheduler": a.scheduler, "outdir": a.outdir,
            "total_s": round(total, 1), "s_per_step": round(total / a.steps, 1),
            "outputs": outs}
     with open(HERE / "timings.jsonl", "a") as fh:

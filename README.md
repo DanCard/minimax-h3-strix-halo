@@ -273,6 +273,8 @@ Or let diffusers fetch per-workflow, which pulls only what the workflow needs.
 - ROCm 7.14 is *newer* than the 7.10/7.11 builds where the gfx1151 video-gen
   fixes landed, so the stack is in good shape.
 - `_flash_3_hub` attention backend is Hopper-only — not available here.
+- **MIOpen `Conv3d` segfaults above a size threshold**, which breaks all image
+  conditioning until patched — see *Image conditioning segfaults* below.
 - Working Strix Halo ComfyUI toolboxes exist:
   https://github.com/kyuz0/amd-strix-halo-comfyui-toolboxes
 
@@ -309,20 +311,30 @@ uv pip install --python ~/.venvs/minimax-h3/bin/python -r /tmp/r.txt
 
 # 4. symlink models_fixed/* into ComfyUI/models/{diffusion_models,text_encoders,vae,loras}
 
-# 5. serve -- HSA_USE_SVM=0 matters on unified memory
+# 5. patch the vision-tower Conv3d -- required for any image conditioning,
+#    see "Image conditioning segfaults" below
+#    ComfyUI/comfy/text_encoders/qwen35.py, Qwen35VisionPatchEmbed.forward
+
+# 6. serve -- HSA_USE_SVM=0 matters on unified memory
 cd ComfyUI && HSA_USE_SVM=0 python main.py --listen 127.0.0.1 --port 8188
 
-# 6. generate
+# 7. generate
 #    fast iteration (~96 s):
 python probe_comfy.py --width 512 --height 288 --length 124 --steps 4 \
   --seed 7 --tag quick --prompt "..."
 #    quality/time compromise (~9.5 min):
 python probe_comfy.py --width 896 --height 512 --length 124 --steps 4 \
   --seed 7 --tag demo --prompt "..."
+#    image-to-video (needs the step 5 patch):
+python probe_comfy.py --width 448 --height 704 --length 124 --steps 4 \
+  --seed 7 --tag anim --image photo.jpg --outdir run1 --prompt "..."
 ```
 
 Width and height must be multiples of 32. Every run appends a row to
-`timings.jsonl`.
+`timings.jsonl`. `--image`/`--last-image` add first/last-frame conditioning;
+each is scaled to the canvas with a centre crop, because the node itself
+plain-stretches whatever it receives. `--outdir` saves into a subdirectory of
+`ComfyUI/output/`.
 
 ### The weights are corrupt as published
 
@@ -344,6 +356,64 @@ the truncated Abiray file is **sha256-identical** to it.
 `Comfy-Org/MiniMax-H3` is the authoritative ComfyUI repackaging and ships the
 same files uncorrupted (plus an int8 text encoder Abiray's README recommends but
 does not actually contain). Prefer it if you are starting fresh.
+
+### Image conditioning segfaults: a MIOpen Conv3d bug
+
+Any image fed to the Qwen3-VL conditioner — `first_frame`/`last_frame` on
+`MiniMaxH3ImageToVideo`, or `ref_images` — killed the server. Three attempts
+produced three *different* failures: a 732 s stall at 1% GPU, a
+`Fatal Python error: Segmentation fault` inside `load_torch_file`, and a
+`malloc(): unaligned tcache chunk detected` inside
+`qwen35.py:fast_pos_embed_interpolate`. Three unrelated crash sites is the
+signature of heap corruption rather than a logic bug: the abort lands wherever
+the next allocation happens to touch the damaged heap, which is why it looked
+like three separate problems.
+
+It is none of the things it looked like. The vision tower is intact (351
+`visual.*` tensors, BF16, `pos_embed` [2304, 1152] = the correct 48x48 grid, no
+`L2P_bypass` markers), `grid_thw` is a sane `[[1, 44, 28]]`, and running with
+`--disable-async-offload --disable-pinned-memory` reproduces the abort at the
+same line. The cause is the vision tower's patch embedding — a `Conv3d`.
+
+Minimal reproduction, no ComfyUI and no H3 weights:
+
+```python
+conv = nn.Conv3d(3, 1152, [2, 16, 16], stride=[2, 16, 16]).cuda()
+x = torch.randn(1232, 3, 2, 16, 16, device="cuda")
+y = conv(x)          # SIGSEGV, core dumped
+```
+
+The trigger is a size threshold on `batch x out_channels`, not a shape quirk:
+
+| batch | out_channels | result |
+| --- | --- | --- |
+| 64 | 1152 | ok |
+| 256 | 1152 | **SIGSEGV** |
+| 1232 | 16 | ok |
+| 1232 | 128 | **SIGSEGV** |
+
+Kernel size is irrelevant (crashes at [2,2,2] through [2,16,16]) and fp32, bf16
+and fp16 all crash. MIOpen appears to switch algorithm above a workspace
+threshold, onto a path that is broken on gfx1151.
+
+**The fix** exploits the fact that this convolution has `stride == kernel_size`
+and receives input pre-shaped to exactly one patch per row — so it is a per-row
+matmul wearing a convolution costume:
+
+```python
+# comfy/text_encoders/qwen35.py, Qwen35VisionPatchEmbed.forward
+weight, bias = comfy.ops.cast_bias_weight(self.proj, x)
+return F.linear(x.flatten(1), weight.reshape(self.embed_dim, -1), bias)
+```
+
+Numerically identical, not an approximation: max abs difference 5.2e-6 against
+the conv at batch 64 where MIOpen still works, which is float32 reduction-order
+noise. It also skips MIOpen entirely rather than working around it by chunking.
+
+This is **not H3-specific** — it is a general Qwen3-VL image-conditioning bug on
+this GPU. Any Qwen3-VL vision input above ~256 patches (roughly, any image
+larger than 256x256) hits it. Worth reporting upstream, separately from the
+weight corruption above.
 
 ## Open threads
 
