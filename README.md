@@ -395,7 +395,9 @@ indistinguishable afterwards.
 Defaults worth knowing: **`sgm_uniform`** scheduler and **`--lora-strength
 0.85`**, both chosen by sweep (see below), `res_multistep` sampler, 4 steps.
 Raising the step count at full LoRA strength makes output *worse*, not better;
-at 0.85 more steps help slightly but cost proportionally.
+at 0.85 more steps help slightly but cost proportionally. **Exception: use
+`--steps 8` for anything with speech** — audio and video converge at different
+rates, see *Lip-synced speech works* below.
 
 ### The weights are corrupt as published
 
@@ -441,11 +443,31 @@ audio, knowing nothing about the prompt:
 Verbatim, at 32kHz stereo, with diarization reporting 1 speaker across 2 turns
 and silence at the head and tail rather than talking through the whole clip.
 
-**It works at 4 steps with the turbo LoRA**, which was the real risk — lip-sync
-is fine temporal structure and aggressive distillation is exactly what should
-have destroyed it. It did not, so the cheap-iteration envelope above applies to
-dialogue too. Cost was 232 s at 448x704, i.e. the same as any other clip of that
-size. Speech rides along for free.
+It survives the turbo LoRA at 4 steps, which was the real risk — lip-sync is
+fine temporal structure and aggressive distillation should have destroyed it.
+Cost was 232 s at 448x704, the same as any other clip that size. Speech rides
+along for free.
+
+**But use 8 steps for speech. This is the one default that forks by use case.**
+
+| Use case | Steps | Why |
+|---|---|---|
+| Video only | **4** | 8 steps measurably *reduced* image detail (−18%) |
+| **Dialogue / speech** | **8** | 4-step audio has an audible ringing artefact; 8 is clearly cleaner |
+
+The 4 → 8 improvement is **very noticeable** by ear. 16 is slightly better again
+but well into diminishing returns and not worth 2x the cost over 8.
+
+Video and audio are denoised in the same packed sequence yet evidently converge
+at **different rates**, and the turbo LoRA is distilled against the *video*
+objective — so no single step count serves both. That is the whole explanation
+for the split.
+
+**Intelligibility is not quality**, and conflating them cost a wrong call here.
+An earlier version of this section concluded 4 steps was fine for dialogue
+because Whisper transcribed it perfectly. It does, and it still does — the words
+are correct at 4 steps. They are also correct at 8. What differs is the ringing
+underneath, which transcription is completely blind to.
 
 Notes for going further:
 
@@ -459,7 +481,14 @@ Notes for going further:
 - **Transcribe + diarize the output to check it.** For multi-speaker work this
   answers the question that matters and is hard to judge by ear: whether the
   model produced two *distinct* voices alternating, or one voice reading both
-  parts.
+  parts. It says nothing about audio *quality* — see above.
+- **Iterate at 512x288.** Audio came out intelligible and clean at the smallest
+  canvas, transcribing identically, at 87 s for 4 steps (~170 s at 8). Script,
+  timing and voice work can all be tuned there before committing to a large
+  canvas. One seed only, so treat as promising rather than established.
+- **Audio artefacts are not the container.** The muxed AAC is 131 kbps at 32kHz
+  stereo with clean response to 15 kHz and no spectral holes; anything audibly
+  wrong is in the generated audio, not the encode.
 
 ### Quality levers: only resolution worked
 
@@ -597,6 +626,23 @@ movement.
 gaps above and actively misleading below roughly 2x. For anything subtle, pull
 native-resolution crops and look — a labelled contact sheet takes about twenty
 seconds and would have prevented the wrong call here.
+
+**This generalises, and audio is worse.** Every scalar proxy reached for during
+this work failed on the subtle comparisons while working fine on the gross ones:
+
+| Metric | Failure |
+|---|---|
+| Laplacian variance | ranked the two *broken* schedulers 1st and 2nd |
+| Laplacian variance | read `beta`'s crushed blacks and blown highlights as detail |
+| Harmonic-to-noise ratio | rewarded the ringing artefact — it *is* peak-to-valley ratio, and a ring is a peak |
+| Tonal prominence | picked out 90 Hz rumble, then pointed the wrong way in the 1–10 kHz band |
+| Whisper transcription | perfect at 4 and 8 steps alike; blind to the artefact entirely |
+
+Three separate audio measurements disagreed with a listener who could hear the
+difference immediately, and the listener was right. The rule that survived all
+of it: **use metrics to catch things that are grossly broken, and eyes and ears
+for everything else.** Where a proxy and a human disagree on a subtle call, the
+human wins — the proxy is usually measuring the artefact.
 
 ### Image conditioning segfaults: a MIOpen Conv3d bug
 
