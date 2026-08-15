@@ -478,10 +478,20 @@ Notes for going further:
   448x704 ~111k (~43 min).
 - **Two *visible* characters want `ref2va`**, a different checkpoint
   (`minimax_h3_ref2va_pruned_int8_convrot`, 21GB) driven by portrait stills.
-- **Transcribe + diarize the output to check it.** For multi-speaker work this
-  answers the question that matters and is hard to judge by ear: whether the
-  model produced two *distinct* voices alternating, or one voice reading both
-  parts. It says nothing about audio *quality* — see above.
+- **Two speakers work, even at 512x288 and 5.17 s.** A two-shot with `(S1)` and
+  `(S2)` produced both lines word-perfect *in audibly distinct voices* — a clear
+  female and a low gravelly male, as prompted. 148 s at 8 steps.
+- **Do not trust diarization to verify this.** pyannote reported "1 speaker
+  across 3 turns" for that clip, and it was wrong — the voices are obviously
+  different to a listener. At ~2 s of speech per speaker there is not enough
+  audio to build usable embeddings. Transcription is reliable for *words*;
+  speaker separation at this clip length is not, and it says nothing about audio
+  quality either. Listen instead.
+- **The timeline syntax appears to be ignored at this length.** An explicit
+  `At 00:02.500` for the second speaker produced continuous speech from 0.0 to
+  4.67 s with no gap, unlike the single-speaker clip which had clean silence at
+  head and tail. The model packed both lines in rather than honouring the
+  timing. Untested at longer durations, where it may well behave.
 - **Iterate at 512x288.** Audio came out intelligible and clean at the smallest
   canvas, transcribing identically, at 87 s for 4 steps (~170 s at 8). Script,
   timing and voice work can all be tuned there before committing to a large
@@ -637,9 +647,13 @@ this work failed on the subtle comparisons while working fine on the gross ones:
 | Harmonic-to-noise ratio | rewarded the ringing artefact — it *is* peak-to-valley ratio, and a ring is a peak |
 | Tonal prominence | picked out 90 Hz rumble, then pointed the wrong way in the 1–10 kHz band |
 | Whisper transcription | perfect at 4 and 8 steps alike; blind to the artefact entirely |
+| pyannote diarization | reported 1 speaker for a clip with two audibly distinct voices |
 
 Three separate audio measurements disagreed with a listener who could hear the
-difference immediately, and the listener was right. The rule that survived all
+difference immediately, and the listener was right. A fourth — diarization —
+was then proposed *in this file* as the objective check for multi-speaker
+output, and failed on its first real use for the same reason: too little signal
+for the tool's assumptions. The rule that survived all
 of it: **use metrics to catch things that are grossly broken, and eyes and ears
 for everything else.** Where a proxy and a human disagree on a subtle call, the
 human wins — the proxy is usually measuring the artefact.
