@@ -429,6 +429,7 @@ how far that number can be trusted.
 | 8 steps, turbo LoRA | 251.6 | −18% | slightly worse |
 | **20 steps, no LoRA** | 85.5 | **−72%** | **much worse** |
 | Unpruned int8 diffusion (34GB vs 21GB) | 278.1 | −9.5% | indistinguishable |
+| **bf16 diffusion, unquantized (38GB vs 21GB)** | — | — | **indistinguishable** |
 | **int8 text encoder (27GB vs int4 15GB)** | — | — | **indistinguishable** |
 | Scheduler (6 swept) | — | — | small win — `sgm_uniform` |
 | **768x1344 vs 384x640** | — | **9.1x** | **decisive** |
@@ -444,10 +445,36 @@ or demonstrably irrelevant.
   consistent with the LoRA being trained for exactly 4. The model is
   guidance-distilled at the base, so removing the LoRA does not restore CFG; it
   just samples a schedule nothing was tuned for.
-- **Pruning is not the lever.** Unpruned int8 landed within noise of pruned, at
-  1.5x the per-step cost (31.7 vs 21.0 s/it — the weights are 1.62x larger and
-  small canvases are weight-bandwidth bound). One seed only, so this rules out a
-  *large* effect, not a small one.
+- **Pruning is not the lever.** Unpruned int8 landed within noise of pruned.
+  One seed only, so this rules out a *large* effect, not a small one.
+- **Quantizing the diffusion model is not the lever either.** This needed a
+  second test: pruned int8 vs *unpruned* int8 varies **pruning**, not
+  precision — both arms are int8 — so the first A/B never touched quantization
+  at all. An earlier version of this file claimed every quantized component had
+  been checked against a higher-precision version, which was not true of the
+  component doing the actual generating. Pruned **bf16** (38GB, unquantized)
+  against pruned int8 (21GB), pruning held constant, settles it: no visible
+  difference, and bf16's file is *smaller* (631KB vs 704KB), which argues
+  against it resolving more detail.
+
+**int8 is not the faster option.** Matched conditions — 448x704, first run on a
+freshly restarted server, int4 encoder, only the diffusion weights differing:
+
+| Diffusion weights | Sampler |
+|---|---|
+| pruned int8, 21GB | 59.8 s/it |
+| **pruned bf16, 38GB** | **49.6 s/it** |
+
+bf16 is **~17% faster** at 1.8x the weights, so dequantization costs more here
+than the memory bandwidth it saves — int8 has no fast path on gfx1151 worth the
+overhead. An earlier reading of this comparison had it backwards by measuring
+bf16's cold run against an int8 run that was already autotuned; per-step numbers
+are only comparable at matching server age *and* matching autotune state.
+
+So int8's benefit is **footprint, not speed**. That still matters at the trained
+canvas: 1344x768 with int8 already sits at 89% VRAM, and bf16 adds 17GB on top,
+so int8 (or a fresh measurement) is the safer choice there. Below that, bf16 is
+simply better — same quality, faster, and no quantization to reason about.
 - **Quantizing the text encoder to int4 costs nothing measurable.** int8
   (27GB) against the int4 (15GB) in use, at 448x704 with `sgm_uniform`: both
   rendered the same prompt detail — including a "bright blue eyes" term added
@@ -585,11 +612,12 @@ weight corruption above.
    declared end exactly equal to file size, no repair pass needed — confirming
    the corruption below is Abiray's upload tooling, not upstream. One seed only,
    so a small effect is not excluded; 3–4 seeds per arm would settle it. The
-   **int8 text encoder** (27GB vs the int4 15.7GB in use) was tested too, and is
-   likewise indistinguishable — so every quantized component in the stack has now
-   been checked against a higher-precision version and none of them is costing
-   measurable quality. Both A/Bs are single-seed, which rules out large effects
-   rather than small ones.
+   **int8 text encoder** (27GB vs int4) and **pruned bf16** (38GB, unquantized,
+   vs pruned int8) were both tested too, and both are indistinguishable. Every
+   component is now checked against higher precision along both axes — pruning
+   and quantization — and none costs measurable quality. bf16 is also ~17%
+   *faster* than int8 at 448x704, so int8 buys footprint rather than speed. All
+   A/Bs are single-seed, which rules out large effects rather than small ones.
 3. ~~**Finish a 1344x768 run.**~~ **Done — 56 min 47 s**, and 768x1344 portrait
    in 58 min 21 s. It did not confirm the quadratic model, it broke it: the
    top-end exponent is ~2.3, not 2.0, and there is no single exponent at all.
