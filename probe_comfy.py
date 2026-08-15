@@ -151,7 +151,8 @@ def main():
     p.add_argument("--scheduler", default="sgm_uniform")
     p.add_argument("--lora", action="store_true", default=True, help="use 4-step turbo LoRA")
     p.add_argument("--no-lora", dest="lora", action="store_false")
-    p.add_argument("--lora-strength", type=float, default=1.0)
+    p.add_argument("--lora-strength", type=float, default=0.85,
+                   help="0.85 beats 1.0 at the same 4 steps; see README")
     p.add_argument("--image", help="first frame; image-to-video instead of text-to-video")
     p.add_argument("--last-image", help="last frame; with --image this interpolates a transformation")
     a = p.parse_args()

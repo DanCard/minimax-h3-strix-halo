@@ -156,6 +156,8 @@ together. No separate vocoder.
 - 33B Omni-Transformer + Qwen3-VL-32B as conditioner (reads hidden state after
   decoder layer 50, LM head unused)
 - 24 fps, 5–15 s, 768 px short edge, 32 kHz stereo audio
+- **Lip-synced speech in 11 languages**, generated jointly with the picture —
+  verified working here, see *Lip-synced speech works* below
 - Released BF16. Transformer 61.7 GB, conditioner 62.1 GB
 
 ## Hard constraints (verified from the diffusers integration)
@@ -390,9 +392,10 @@ encoder by filename, for A/B tests; both are recorded in `timings.jsonl`
 alongside the scheduler and LoRA strength, without which ablation rows are
 indistinguishable afterwards.
 
-Defaults worth knowing: **`sgm_uniform`** scheduler (chosen by sweep, see below),
-`res_multistep` sampler, 4 steps with the turbo LoRA at strength 1.0. Raising
-the step count makes output *worse*, not better — the LoRA is trained for 4.
+Defaults worth knowing: **`sgm_uniform`** scheduler and **`--lora-strength
+0.85`**, both chosen by sweep (see below), `res_multistep` sampler, 4 steps.
+Raising the step count at full LoRA strength makes output *worse*, not better;
+at 0.85 more steps help slightly but cost proportionally.
 
 ### The weights are corrupt as published
 
@@ -414,6 +417,49 @@ the truncated Abiray file is **sha256-identical** to it.
 `Comfy-Org/MiniMax-H3` is the authoritative ComfyUI repackaging and ships the
 same files uncorrupted (plus an int8 text encoder Abiray's README recommends but
 does not actually contain). Prefer it if you are starting fresh.
+
+### Lip-synced speech works, and it is free
+
+H3 generates speech in the same pass as the picture — it is not an add-on. The
+prompts in this file mostly asked for ambience (`Audio: waves washing onto
+sand`), which is why speech never appeared. It needs a specific syntax: stable
+speaker IDs outside the tag, and only the language plus the spoken words inside
+it.
+
+```
+She looks directly at the camera and speaks with a clear, confident voice (S1):
+<d>[English] The atmosphere is breathable. We can proceed.</d>
+```
+
+Verified objectively rather than by ear — Whisper was run over the *generated*
+audio, knowing nothing about the prompt:
+
+```
+[00:01.390 --> 00:04.790] SPEAKER_00: The atmosphere is breathable. We can proceed.
+```
+
+Verbatim, at 32kHz stereo, with diarization reporting 1 speaker across 2 turns
+and silence at the head and tail rather than talking through the whole clip.
+
+**It works at 4 steps with the turbo LoRA**, which was the real risk — lip-sync
+is fine temporal structure and aggressive distillation is exactly what should
+have destroyed it. It did not, so the cheap-iteration envelope above applies to
+dialogue too. Cost was 232 s at 448x704, i.e. the same as any other clip of that
+size. Speech rides along for free.
+
+Notes for going further:
+
+- **Keep lines short.** Sync is documented to drift on longer clips and dense
+  lines, and 5.17 s fits roughly one short line per speaker.
+- **Two-way dialogue needs duration, which is the expensive axis.** Real
+  alternation wants 10–15 s: 362 frames at 384x640 is ~86k tokens (~25 min), at
+  448x704 ~111k (~43 min).
+- **Two *visible* characters want `ref2va`**, a different checkpoint
+  (`minimax_h3_ref2va_pruned_int8_convrot`, 21GB) driven by portrait stills.
+- **Transcribe + diarize the output to check it.** For multi-speaker work this
+  answers the question that matters and is hard to judge by ear: whether the
+  model produced two *distinct* voices alternating, or one voice reading both
+  parts.
 
 ### Quality levers: only resolution worked
 
@@ -439,12 +485,29 @@ and the scheduler was worth a small free improvement. The generation-side search
 is effectively exhausted: each component is either already at its best setting
 or demonstrably irrelevant.
 
-- **Step count is not the lever.** Dropping the turbo LoRA and running 20 steps
-  produced 3.6x *less* detail, corroborated independently by file size (392KB vs
-  695KB — H.264 encodes soft video small). 8 steps was mildly worse than 4,
-  consistent with the LoRA being trained for exactly 4. The model is
-  guidance-distilled at the base, so removing the LoRA does not restore CFG; it
-  just samples a schedule nothing was tuned for.
+- **Step count alone is not the lever — but it interacts with LoRA strength.**
+  Dropping the turbo LoRA and running 20 steps produced 3.6x *less* detail,
+  corroborated independently by file size (392KB vs 695KB — H.264 encodes soft
+  video small). 8 steps was mildly worse than 4. The model is guidance-distilled
+  at the base, so removing the LoRA does not restore CFG; it just samples a
+  schedule nothing was tuned for.
+
+  That test held `lora_strength` at 1.0 throughout and concluded "steps are not
+  the lever", which was true only *at full strength*. Sweeping strength
+  separately shows the two axes are not independent:
+
+  | Strength @ steps | Wall | Read |
+  |---|---|---|
+  | 1.0 @ 4 (old default) | 349 s | baseline; softer, flatter eyes |
+  | **0.85 @ 4 (now default)** | **313 s** | **better eye definition and lashes at the same cost** |
+  | 0.85 @ 6 | 629 s | best of the four — finest hair, most defined eyes |
+  | 0.70 @ 8 | 393 s | comparable to 0.85 @ 6; extra steps buy nothing |
+
+  **`--lora-strength 0.85` at 4 steps is free quality.** Use 6 steps only for a
+  final render where ~2x sampling is acceptable — at 768x1344 that is ~2 hours.
+  These four are much closer together than the scheduler or resolution
+  differences and sit near the edge of what one seed supports: the 0.85-over-1.0
+  gap looks real, the 0.85@6-vs-0.70@8 gap is not defensible.
 - **Pruning is not the lever.** Unpruned int8 landed within noise of pruned.
   One seed only, so this rules out a *large* effect, not a small one.
 - **Quantizing the diffusion model is not the lever either.** This needed a
